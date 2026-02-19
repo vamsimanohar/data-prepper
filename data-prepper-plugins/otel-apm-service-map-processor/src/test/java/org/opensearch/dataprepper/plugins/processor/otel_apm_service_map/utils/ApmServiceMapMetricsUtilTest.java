@@ -20,6 +20,7 @@ import org.opensearch.dataprepper.model.metric.JacksonHistogram;
 import org.opensearch.dataprepper.model.metric.JacksonMetric;
 import org.opensearch.dataprepper.model.metric.JacksonSum;
 import org.opensearch.dataprepper.plugins.processor.otel_apm_service_map.model.internal.ClientSpanDecoration;
+import org.opensearch.dataprepper.plugins.processor.otel_apm_service_map.model.internal.ProducerSpanDecoration;
 import org.opensearch.dataprepper.plugins.processor.otel_apm_service_map.model.internal.HistogramBuckets;
 import org.opensearch.dataprepper.plugins.processor.otel_apm_service_map.model.internal.MetricAggregationState;
 import org.opensearch.dataprepper.plugins.processor.otel_apm_service_map.model.internal.MetricKey;
@@ -600,7 +601,171 @@ class ApmServiceMapMetricsUtilTest {
         assertFalse(labels.containsKey("remoteOperation"));
     }
 
-    @Test 
+    @Test
+    void testGenerateMetricsForProducerSpan_Success() {
+        // Given
+        SpanStateData producerSpan = createMockSpanStateDataWithMessaging(
+                "producer-service", "publish-op", "test-env", "kafka", "orders-topic");
+        ProducerSpanDecoration decoration = new ProducerSpanDecoration(
+                "parent-entry-op", "remote-env", "consumer-service", "consume-op",
+                Collections.emptyMap(), "kafka", "orders-topic"
+        );
+
+        // When
+        ApmServiceMapMetricsUtil.generateMetricsForProducerSpan(
+                producerSpan, decoration, currentTime, metricsStateByKey, anchorTimestamp);
+
+        // Then
+        assertEquals(1, metricsStateByKey.size());
+        MetricAggregationState state = metricsStateByKey.values().iterator().next();
+        assertEquals(1, state.getRequestCount());
+        assertEquals(0, state.getErrorCount());
+        assertEquals(1, state.getLatencyDurations().size());
+
+        // Verify labels include messaging fields
+        MetricKey key = metricsStateByKey.keySet().iterator().next();
+        Map<String, Object> labels = key.getLabels();
+        assertEquals("kafka", labels.get("messagingSystem"));
+        assertEquals("orders-topic", labels.get("messagingDestination"));
+        assertEquals("parent-entry-op", labels.get("operation"));
+        assertEquals("consumer-service", labels.get("remoteService"));
+    }
+
+    @Test
+    void testGenerateMetricsForProducerSpan_WithNullMessagingFields() {
+        // Given
+        SpanStateData producerSpan = createMockSpanStateData("producer-service", "publish-op", "test-env");
+        ProducerSpanDecoration decoration = new ProducerSpanDecoration(
+                "parent-op", "remote-env", "consumer-service", "consume-op",
+                Collections.emptyMap(), null, null
+        );
+
+        // When
+        ApmServiceMapMetricsUtil.generateMetricsForProducerSpan(
+                producerSpan, decoration, currentTime, metricsStateByKey, anchorTimestamp);
+
+        // Then
+        MetricKey key = metricsStateByKey.keySet().iterator().next();
+        Map<String, Object> labels = key.getLabels();
+        assertFalse(labels.containsKey("messagingSystem"));
+        assertFalse(labels.containsKey("messagingDestination"));
+    }
+
+    @Test
+    void testGenerateMetricsForConsumerSpan_Success() {
+        // Given
+        SpanStateData consumerSpan = createMockSpanStateDataWithMessaging(
+                "consumer-service", "process-order", "test-env", "kafka", "orders-topic");
+
+        // When
+        ApmServiceMapMetricsUtil.generateMetricsForConsumerSpan(
+                consumerSpan, currentTime, metricsStateByKey, anchorTimestamp);
+
+        // Then
+        assertEquals(1, metricsStateByKey.size());
+        MetricAggregationState state = metricsStateByKey.values().iterator().next();
+        assertEquals(1, state.getRequestCount());
+        assertEquals(1, state.getLatencyDurations().size());
+
+        // Verify labels include messaging fields
+        MetricKey key = metricsStateByKey.keySet().iterator().next();
+        Map<String, Object> labels = key.getLabels();
+        assertEquals("kafka", labels.get("messagingSystem"));
+        assertEquals("orders-topic", labels.get("messagingDestination"));
+        assertEquals("consumer-service", labels.get("service"));
+    }
+
+    @Test
+    void testGenerateMetricsForConsumerSpan_WithNullMessagingFields() {
+        // Given
+        SpanStateData consumerSpan = createMockSpanStateData("consumer-service", "process-op", "test-env");
+
+        // When
+        ApmServiceMapMetricsUtil.generateMetricsForConsumerSpan(
+                consumerSpan, currentTime, metricsStateByKey, anchorTimestamp);
+
+        // Then
+        MetricKey key = metricsStateByKey.keySet().iterator().next();
+        Map<String, Object> labels = key.getLabels();
+        assertFalse(labels.containsKey("messagingSystem"));
+        assertFalse(labels.containsKey("messagingDestination"));
+    }
+
+    @Test
+    void testGenerateMetricsForConsumerSpan_WithError() {
+        // Given
+        SpanStateData errorConsumerSpan = createSpanWithHttpStatusAndMessaging(400, "kafka", "orders-topic");
+
+        // When
+        ApmServiceMapMetricsUtil.generateMetricsForConsumerSpan(
+                errorConsumerSpan, currentTime, metricsStateByKey, anchorTimestamp);
+
+        // Then
+        MetricAggregationState state = metricsStateByKey.values().iterator().next();
+        assertEquals(1, state.getRequestCount());
+        assertEquals(1, state.getErrorCount());
+        assertEquals(0, state.getFaultCount());
+        assertEquals(1, state.getErrorExemplars().size());
+    }
+
+    private SpanStateData createMockSpanStateDataWithMessaging(String serviceName, String operationName,
+                                                                String environment, String messagingSystem,
+                                                                String messagingDestination) {
+        Map<String, Object> spanAttributes = new HashMap<>();
+        spanAttributes.put("resource", Map.of("attributes", Map.of("deployment.environment.name", environment)));
+        if (messagingSystem != null) {
+            spanAttributes.put("messaging.system", messagingSystem);
+        }
+        if (messagingDestination != null) {
+            spanAttributes.put("messaging.destination.name", messagingDestination);
+        }
+
+        return new SpanStateData(
+                serviceName,
+                Hex.encodeHexString(new byte[]{1, 2, 3, 4, 5, 6, 7, 8}),
+                Hex.encodeHexString(new byte[]{9, 10, 11, 12, 13, 14, 15, 16}),
+                Hex.encodeHexString(new byte[]{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16}),
+                "PRODUCER",
+                operationName,
+                operationName,
+                1000000000L,
+                "OK",
+                "2023-01-01T00:00:00.000Z",
+                Collections.singletonMap("custom", "value"),
+                spanAttributes
+        );
+    }
+
+    private SpanStateData createSpanWithHttpStatusAndMessaging(int httpStatusCode,
+                                                                String messagingSystem,
+                                                                String messagingDestination) {
+        Map<String, Object> spanAttributes = new HashMap<>();
+        spanAttributes.put("http.response.status_code", httpStatusCode);
+        spanAttributes.put("resource", Map.of("attributes", Map.of("deployment.environment.name", "test-env")));
+        if (messagingSystem != null) {
+            spanAttributes.put("messaging.system", messagingSystem);
+        }
+        if (messagingDestination != null) {
+            spanAttributes.put("messaging.destination.name", messagingDestination);
+        }
+
+        return new SpanStateData(
+                "test-service",
+                Hex.encodeHexString(new byte[]{1, 2, 3, 4, 5, 6, 7, 8}),
+                Hex.encodeHexString(new byte[]{9, 10, 11, 12, 13, 14, 15, 16}),
+                Hex.encodeHexString(new byte[]{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16}),
+                "CONSUMER",
+                "test-operation",
+                "test-operation",
+                1000000000L,
+                "OK",
+                "2023-01-01T00:00:00.000Z",
+                Collections.singletonMap("custom", "value"),
+                spanAttributes
+        );
+    }
+
+    @Test
     void testMetricsSortedByTimestamp() {
         // Given
         MetricAggregationState state1 = new MetricAggregationState(1, 0, 0);

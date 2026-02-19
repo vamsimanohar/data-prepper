@@ -25,12 +25,17 @@ class EphemeralSpanDecorationsTest {
     private EphemeralSpanDecorations decorations;
     private ClientSpanDecoration clientDecoration;
     private ServerSpanDecoration serverDecoration;
+    private ProducerSpanDecoration producerDecoration;
+    private ConsumerSpanDecoration consumerDecoration;
 
     @BeforeEach
     void setUp() {
         decorations = new EphemeralSpanDecorations();
         clientDecoration = new ClientSpanDecoration("parentOp", "env", "service", "op", Collections.emptyMap());
         serverDecoration = new ServerSpanDecoration(Collections.emptyList());
+        producerDecoration = new ProducerSpanDecoration("parentOp", "env", "service", "op",
+                Collections.emptyMap(), "kafka", "orders-topic");
+        consumerDecoration = new ConsumerSpanDecoration(Collections.emptyList(), Collections.emptyList());
     }
 
     @Test
@@ -60,18 +65,48 @@ class EphemeralSpanDecorationsTest {
     }
 
     @Test
+    void testProducerDecorationOperations() {
+        String spanId = "span789";
+
+        assertNull(decorations.getProducerDecoration(spanId));
+        assertFalse(decorations.hasProducerDecoration(spanId));
+
+        decorations.setProducerDecoration(spanId, producerDecoration);
+
+        assertEquals(producerDecoration, decorations.getProducerDecoration(spanId));
+        assertTrue(decorations.hasProducerDecoration(spanId));
+    }
+
+    @Test
+    void testConsumerDecorationOperations() {
+        String spanId = "span101";
+
+        assertNull(decorations.getConsumerDecoration(spanId));
+        assertFalse(decorations.hasConsumerDecoration(spanId));
+
+        decorations.setConsumerDecoration(spanId, consumerDecoration);
+
+        assertEquals(consumerDecoration, decorations.getConsumerDecoration(spanId));
+        assertTrue(decorations.hasConsumerDecoration(spanId));
+    }
+
+    @Test
     void testSizeAndClear() {
         assertEquals(0, decorations.size());
-        
+
         decorations.setClientDecoration("client1", clientDecoration);
         decorations.setServerDecoration("server1", serverDecoration);
-        
-        assertEquals(2, decorations.size());
-        
+        decorations.setProducerDecoration("producer1", producerDecoration);
+        decorations.setConsumerDecoration("consumer1", consumerDecoration);
+
+        assertEquals(4, decorations.size());
+
         decorations.clear();
-        
+
         assertEquals(0, decorations.size());
         assertFalse(decorations.hasClientDecoration("client1"));
         assertFalse(decorations.hasServerDecoration("server1"));
+        assertFalse(decorations.hasProducerDecoration("producer1"));
+        assertFalse(decorations.hasConsumerDecoration("consumer1"));
     }
 }

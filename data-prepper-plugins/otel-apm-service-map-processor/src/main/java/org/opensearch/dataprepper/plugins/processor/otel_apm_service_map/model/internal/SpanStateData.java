@@ -19,7 +19,6 @@ import java.util.Collections;
 import java.util.Map;
 import java.util.Objects;
 
-// TODO : 1. Add new rules as per Producer/Consumers/LocalRoot
 @Getter
 public class SpanStateData implements Serializable {
     private String serviceName;
@@ -37,6 +36,8 @@ public class SpanStateData implements Serializable {
     private String operationName;
     private String environment;
     private Map<String, String> groupByAttributes;
+    private String messagingSystem;
+    private String messagingDestination;
 
     public SpanStateData(final String serviceName,
                          final String spanId,
@@ -69,6 +70,39 @@ public class SpanStateData implements Serializable {
         this.operationName = OTelSpanDerivationUtil.computeOperationName(spanName, spanAttributes);
 
         this.environment = OTelSpanDerivationUtil.computeEnvironment(spanAttributes);
+
+        this.messagingSystem = extractMessagingSystem(spanAttributes);
+        this.messagingDestination = extractMessagingDestination(spanAttributes);
+    }
+
+    private String extractMessagingSystem(final Map<String, Object> spanAttributes) {
+        if (spanAttributes == null) {
+            return null;
+        }
+        final Object value = spanAttributes.get("messaging.system");
+        return value != null ? value.toString() : null;
+    }
+
+    private String extractMessagingDestination(final Map<String, Object> spanAttributes) {
+        if (spanAttributes == null) {
+            return null;
+        }
+        // Primary: messaging.destination.name (OTel semantic convention)
+        Object value = spanAttributes.get("messaging.destination.name");
+        if (value != null) {
+            return value.toString();
+        }
+        // Fallback: messaging.kafka.destination.name
+        value = spanAttributes.get("messaging.kafka.destination.name");
+        if (value != null) {
+            return value.toString();
+        }
+        // Fallback: messaging.rabbitmq.destination.routing_key
+        value = spanAttributes.get("messaging.rabbitmq.destination.routing_key");
+        if (value != null) {
+            return value.toString();
+        }
+        return null;
     }
 
     /**

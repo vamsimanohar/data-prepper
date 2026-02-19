@@ -16,6 +16,7 @@ import org.opensearch.dataprepper.model.metric.JacksonMetric;
 import org.opensearch.dataprepper.model.metric.JacksonStandardHistogram;
 import org.opensearch.dataprepper.model.metric.JacksonSum;
 import org.opensearch.dataprepper.plugins.processor.otel_apm_service_map.model.internal.ClientSpanDecoration;
+import org.opensearch.dataprepper.plugins.processor.otel_apm_service_map.model.internal.ProducerSpanDecoration;
 import org.opensearch.dataprepper.plugins.processor.otel_apm_service_map.model.internal.HistogramBuckets;
 import org.opensearch.dataprepper.plugins.processor.otel_apm_service_map.model.internal.MetricAggregationState;
 import org.opensearch.dataprepper.plugins.processor.otel_apm_service_map.model.internal.MetricKey;
@@ -147,6 +148,107 @@ public final class ApmServiceMapMetricsUtil {
         // Add exemplars for fault spans
         if (serverSpan.getFault() == 1 && state.getFaultExemplars().size() < 10) {
             state.addFaultExemplar(createExemplarFromSpan(serverSpan, state.getFaultCount()));
+        }
+    }
+
+    /**
+     * Generate metrics for a PRODUCER span using decorated relationship data.
+     * Labels mirror CLIENT metrics with additional messagingSystem and messagingDestination.
+     *
+     * @param producerSpan The PRODUCER span
+     * @param decoration The PRODUCER span decoration containing pre-computed relationship data
+     * @param currentTime Current timestamp
+     * @param metricsStateByKey Shared map for metric aggregation
+     * @param anchorTimestamp The anchor timestamp for metrics
+     */
+    public static void generateMetricsForProducerSpan(final SpanStateData producerSpan,
+                                                      final ProducerSpanDecoration decoration,
+                                                      final Instant currentTime,
+                                                      final Map<MetricKey, MetricAggregationState> metricsStateByKey,
+                                                      final Instant anchorTimestamp) {
+        final Map<String, Object> labels = new HashMap<>();
+        labels.put("namespace", "span_derived");
+        labels.put("environment", producerSpan.getEnvironment());
+        labels.put("service", producerSpan.getServiceName());
+        labels.put("operation", decoration.getParentEntryOperationName());
+        labels.put("remoteEnvironment", decoration.getRemoteEnvironment());
+        labels.put("remoteService", decoration.getRemoteService());
+        labels.put("remoteOperation", decoration.getRemoteOperation());
+        if (decoration.getMessagingSystem() != null) {
+            labels.put("messagingSystem", decoration.getMessagingSystem());
+        }
+        if (decoration.getMessagingDestination() != null) {
+            labels.put("messagingDestination", decoration.getMessagingDestination());
+        }
+        labels.putAll(producerSpan.getGroupByAttributes());
+
+        final MetricKey metricKey = new MetricKey(labels, anchorTimestamp);
+        MetricAggregationState state = metricsStateByKey.computeIfAbsent(metricKey, k -> new MetricAggregationState());
+
+        state.incrementRequestCount(1);
+
+        Long durationInNanos = producerSpan.getDurationInNanos();
+        if (durationInNanos != null && durationInNanos > 0) {
+            final double durationInSeconds = durationInNanos / 1_000_000_000.0;
+            state.addLatencyDuration(durationInSeconds);
+        }
+
+        state.incrementErrorCount(producerSpan.getError());
+        state.incrementFaultCount(producerSpan.getFault());
+
+        if (producerSpan.getError() == 1 && state.getErrorExemplars().size() < 10) {
+            state.addErrorExemplar(createExemplarFromSpan(producerSpan, state.getErrorCount()));
+        }
+        if (producerSpan.getFault() == 1 && state.getFaultExemplars().size() < 10) {
+            state.addFaultExemplar(createExemplarFromSpan(producerSpan, state.getFaultCount()));
+        }
+    }
+
+    /**
+     * Generate metrics for a CONSUMER span using span data directly.
+     * Labels mirror SERVER metrics with additional messagingSystem and messagingDestination.
+     *
+     * @param consumerSpan The CONSUMER span
+     * @param currentTime Current timestamp
+     * @param metricsStateByKey Shared map for metric aggregation
+     * @param anchorTimestamp The anchor timestamp for metrics
+     */
+    public static void generateMetricsForConsumerSpan(final SpanStateData consumerSpan,
+                                                      final Instant currentTime,
+                                                      final Map<MetricKey, MetricAggregationState> metricsStateByKey,
+                                                      final Instant anchorTimestamp) {
+        final Map<String, Object> labels = new HashMap<>();
+        labels.put("namespace", "span_derived");
+        labels.put("environment", consumerSpan.getEnvironment());
+        labels.put("service", consumerSpan.getServiceName());
+        labels.put("operation", consumerSpan.getOperationName());
+        if (consumerSpan.getMessagingSystem() != null) {
+            labels.put("messagingSystem", consumerSpan.getMessagingSystem());
+        }
+        if (consumerSpan.getMessagingDestination() != null) {
+            labels.put("messagingDestination", consumerSpan.getMessagingDestination());
+        }
+        labels.putAll(consumerSpan.getGroupByAttributes());
+
+        final MetricKey metricKey = new MetricKey(labels, anchorTimestamp);
+        MetricAggregationState state = metricsStateByKey.computeIfAbsent(metricKey, k -> new MetricAggregationState());
+
+        state.incrementRequestCount(1);
+
+        Long durationInNanos = consumerSpan.getDurationInNanos();
+        if (durationInNanos != null && durationInNanos > 0) {
+            final double durationInSeconds = durationInNanos / 1_000_000_000.0;
+            state.addLatencyDuration(durationInSeconds);
+        }
+
+        state.incrementErrorCount(consumerSpan.getError());
+        state.incrementFaultCount(consumerSpan.getFault());
+
+        if (consumerSpan.getError() == 1 && state.getErrorExemplars().size() < 10) {
+            state.addErrorExemplar(createExemplarFromSpan(consumerSpan, state.getErrorCount()));
+        }
+        if (consumerSpan.getFault() == 1 && state.getFaultExemplars().size() < 10) {
+            state.addFaultExemplar(createExemplarFromSpan(consumerSpan, state.getFaultCount()));
         }
     }
 

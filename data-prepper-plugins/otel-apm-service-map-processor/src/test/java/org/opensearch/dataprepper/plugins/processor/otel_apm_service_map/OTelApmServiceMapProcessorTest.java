@@ -1193,6 +1193,107 @@ class OTelApmServiceMapProcessorTest extends BaseDataPrepperPluginStandardTestSu
         isolatedProcessor.shutdown();
     }
 
+    @Test
+    void testProducerConsumerTraceGeneratesCorrectEvents() {
+        // Given - Setup clock for three-window processing
+        when(clock.instant())
+            .thenReturn(testTime)                    // Initial timestamp
+            .thenReturn(testTime)                    // windowDurationHasPassed check (call 1)
+            .thenReturn(testTime.plusSeconds(65))    // windowDurationHasPassed check (call 2) - triggers rotation
+            .thenReturn(testTime.plusSeconds(65))    // evaluateApmEvents timestamp
+            .thenReturn(testTime.plusSeconds(65))    // processCurrentWindowSpans timestamp
+            .thenReturn(testTime.plusSeconds(65))    // rotateWindows timestamp
+            .thenReturn(testTime.plusSeconds(130))   // windowDurationHasPassed check (call 3)
+            .thenReturn(testTime.plusSeconds(130))   // evaluateApmEvents timestamp
+            .thenReturn(testTime.plusSeconds(130))   // processCurrentWindowSpans timestamp
+            .thenReturn(testTime.plusSeconds(130));  // rotateWindows timestamp
+
+        final BaseEventBuilder<Event> eventBuilder = mock(EventBuilder.class, RETURNS_DEEP_STUBS);
+        when(eventFactory.eventBuilder(any())).thenReturn(eventBuilder);
+        doAnswer((a) -> {
+            eventMetadata = a.getArgument(0);
+            return eventBuilder;
+        }).when(eventBuilder).withEventMetadata(any());
+        doAnswer((a) -> {
+            eventData = a.getArgument(0);
+            return eventBuilder;
+        }).when(eventBuilder).withData(any());
+        doAnswer((a) -> {
+            return JacksonEvent.builder()
+                    .withEventMetadata(eventMetadata)
+                    .withData(eventData)
+                    .build();
+        }).when(eventBuilder).build();
+
+        File isolatedTempDir = new File(tempDir, "producer-consumer-test-" + System.nanoTime());
+        isolatedTempDir.mkdirs();
+        OTelApmServiceMapProcessor isolatedProcessor = new OTelApmServiceMapProcessor(
+            Duration.ofSeconds(60), isolatedTempDir, clock, 1, eventFactory, pluginMetrics);
+
+        // Create SERVER -> PRODUCER -> CONSUMER trace
+        Map<String, Object> producerAttrs = new HashMap<>();
+        producerAttrs.put("messaging.system", "kafka");
+        producerAttrs.put("messaging.destination.name", "orders-topic");
+
+        Map<String, Object> consumerAttrs = new HashMap<>();
+        consumerAttrs.put("messaging.system", "kafka");
+        consumerAttrs.put("messaging.destination.name", "orders-topic");
+
+        Span serverSpan = createMockSpanWithIdsAndAttributes("order-service", "process-order", "SPAN_KIND_SERVER",
+                                               "1111111111111111", "", "aaaaaaaaaaaaaaaa", Collections.emptyMap());
+        Span producerSpan = createMockSpanWithIdsAndAttributes("order-service", "publish orders-topic", "SPAN_KIND_PRODUCER",
+                                               "2222222222222222", "1111111111111111", "aaaaaaaaaaaaaaaa", producerAttrs);
+        Span consumerSpan = createMockSpanWithIdsAndAttributes("payment-service", "consume orders-topic", "SPAN_KIND_CONSUMER",
+                                               "3333333333333333", "2222222222222222", "aaaaaaaaaaaaaaaa", consumerAttrs);
+
+        List<Record<Event>> records = Arrays.asList(
+            new Record<>(serverSpan),
+            new Record<>(producerSpan),
+            new Record<>(consumerSpan)
+        );
+
+        // When - Three window cycles
+        isolatedProcessor.doExecute(records);
+        isolatedProcessor.doExecute(Collections.emptyList());
+        Collection<Record<Event>> result = isolatedProcessor.doExecute(Collections.emptyList());
+
+        // Then
+        assertNotNull(result);
+        assertTrue(result.size() > 0, "Should produce events for PRODUCER/CONSUMER trace");
+
+        // Verify we have both metric events and NodeOperationDetail events
+        List<Record<Event>> resultList = new ArrayList<>(result);
+        boolean hasProducerEdge = false;
+        boolean hasConsumerMetric = false;
+
+        for (Record<Event> record : resultList) {
+            Event event = record.getData();
+            // Check for messaging fields on NodeOperationDetail events
+            String messagingSystem = event.get("messagingSystem", String.class);
+            if ("kafka".equals(messagingSystem)) {
+                hasProducerEdge = true;
+            }
+            // Check for consumer metrics
+            String name = event.get("name", String.class);
+            if ("request".equals(name)) {
+                hasConsumerMetric = true;
+            }
+        }
+
+        assertTrue(hasProducerEdge || hasConsumerMetric,
+                "Should have either PRODUCER edge with messagingSystem or CONSUMER metrics");
+
+        isolatedProcessor.shutdown();
+    }
+
+    private Span createMockSpanWithIdsAndAttributes(String serviceName, String operationName, String spanKind,
+                                                     String spanId, String parentSpanId, String traceId,
+                                                     Map<String, Object> attributes) {
+        Span mockSpan = createMockSpanWithIds(serviceName, operationName, spanKind, spanId, parentSpanId, traceId);
+        lenient().when(mockSpan.getAttributes()).thenReturn(attributes);
+        return mockSpan;
+    }
+
     // Helper method to create mock spans
     private Span createMockSpan(String serviceName, String operationName, String spanKind) {
         Span mockSpan = mock(Span.class);

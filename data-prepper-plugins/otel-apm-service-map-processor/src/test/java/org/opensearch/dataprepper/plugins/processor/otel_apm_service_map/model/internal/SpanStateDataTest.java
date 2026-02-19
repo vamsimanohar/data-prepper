@@ -93,6 +93,83 @@ class SpanStateDataTest {
     }
 
     @Test
+    void getMessagingSystem_withMessagingSystemAttribute_returnsValue() {
+        Map<String, Object> attributes = new HashMap<>();
+        attributes.put("messaging.system", "kafka");
+
+        SpanStateData data = new SpanStateData(
+            "service", Hex.encodeHexString(new byte[]{1}), null, Hex.encodeHexString(new byte[]{2}), "PRODUCER",
+            "span", "op", 1000L, "OK", "2023-01-01", null, attributes
+        );
+
+        assertEquals("kafka", data.getMessagingSystem());
+    }
+
+    @Test
+    void getMessagingDestination_withPrimaryAttribute_returnsValue() {
+        Map<String, Object> attributes = new HashMap<>();
+        attributes.put("messaging.destination.name", "orders-topic");
+
+        SpanStateData data = new SpanStateData(
+            "service", Hex.encodeHexString(new byte[]{1}), null, Hex.encodeHexString(new byte[]{2}), "PRODUCER",
+            "span", "op", 1000L, "OK", "2023-01-01", null, attributes
+        );
+
+        assertEquals("orders-topic", data.getMessagingDestination());
+    }
+
+    @Test
+    void getMessagingDestination_withKafkaFallback_returnsValue() {
+        Map<String, Object> attributes = new HashMap<>();
+        attributes.put("messaging.kafka.destination.name", "kafka-topic");
+
+        SpanStateData data = new SpanStateData(
+            "service", Hex.encodeHexString(new byte[]{1}), null, Hex.encodeHexString(new byte[]{2}), "PRODUCER",
+            "span", "op", 1000L, "OK", "2023-01-01", null, attributes
+        );
+
+        assertEquals("kafka-topic", data.getMessagingDestination());
+    }
+
+    @Test
+    void getMessagingDestination_withRabbitMqFallback_returnsValue() {
+        Map<String, Object> attributes = new HashMap<>();
+        attributes.put("messaging.rabbitmq.destination.routing_key", "events-queue");
+
+        SpanStateData data = new SpanStateData(
+            "service", Hex.encodeHexString(new byte[]{1}), null, Hex.encodeHexString(new byte[]{2}), "PRODUCER",
+            "span", "op", 1000L, "OK", "2023-01-01", null, attributes
+        );
+
+        assertEquals("events-queue", data.getMessagingDestination());
+    }
+
+    @Test
+    void getMessagingFields_withNullAttributes_returnsNull() {
+        SpanStateData data = new SpanStateData(
+            "service", Hex.encodeHexString(new byte[]{1}), null, Hex.encodeHexString(new byte[]{2}), "PRODUCER",
+            "span", "op", 1000L, "OK", "2023-01-01", null, null
+        );
+
+        assertEquals(null, data.getMessagingSystem());
+        assertEquals(null, data.getMessagingDestination());
+    }
+
+    @Test
+    void getMessagingDestination_primaryTakesPrecedenceOverFallback() {
+        Map<String, Object> attributes = new HashMap<>();
+        attributes.put("messaging.destination.name", "primary-topic");
+        attributes.put("messaging.kafka.destination.name", "kafka-fallback");
+
+        SpanStateData data = new SpanStateData(
+            "service", Hex.encodeHexString(new byte[]{1}), null, Hex.encodeHexString(new byte[]{2}), "PRODUCER",
+            "span", "op", 1000L, "OK", "2023-01-01", null, attributes
+        );
+
+        assertEquals("primary-topic", data.getMessagingDestination());
+    }
+
+    @Test
     void equals_withSameData_returnsTrue() {
         byte[] spanId = {1, 2, 3};
         byte[] traceId = {4, 5, 6};

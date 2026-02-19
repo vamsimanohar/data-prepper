@@ -48,16 +48,34 @@ public class NodeOperationDetail {
     @JsonProperty("timestamp")
     private final String timestamp;
 
+    @JsonProperty("messagingSystem")
+    private final String messagingSystem;
+
+    @JsonProperty("messagingDestination")
+    private final String messagingDestination;
+
     public NodeOperationDetail(final Node sourceNode,
                                final Node targetNode,
                                final Operation sourceOperation,
                                final Operation targetOperation,
                                final Instant timestamp) {
+        this(sourceNode, targetNode, sourceOperation, targetOperation, timestamp, null, null);
+    }
+
+    public NodeOperationDetail(final Node sourceNode,
+                               final Node targetNode,
+                               final Operation sourceOperation,
+                               final Operation targetOperation,
+                               final Instant timestamp,
+                               final String messagingSystem,
+                               final String messagingDestination) {
         this.sourceNode = sourceNode;
         this.targetNode = targetNode;
         this.sourceOperation = sourceOperation;
         this.targetOperation = targetOperation;
         this.timestamp = DateTimeFormatter.ISO_INSTANT.format(timestamp);
+        this.messagingSystem = messagingSystem;
+        this.messagingDestination = messagingDestination;
         this.nodeConnectionHash = String.valueOf(Objects.hash(sourceNode, targetNode));
 
         if (sourceOperation != null && sourceOperation.getName() != null) {
@@ -97,6 +115,14 @@ public class NodeOperationDetail {
         return timestamp;
     }
 
+    public String getMessagingSystem() {
+        return messagingSystem;
+    }
+
+    public String getMessagingDestination() {
+        return messagingDestination;
+    }
+
     @Override
     public boolean equals(Object o) {
         if (o == null || getClass() != o.getClass()) return false;
@@ -107,13 +133,16 @@ public class NodeOperationDetail {
                 Objects.equals(targetOperation, that.targetOperation) &&
                 Objects.equals(nodeConnectionHash, that.nodeConnectionHash) &&
                 Objects.equals(operationConnectionHash, that.operationConnectionHash) &&
-                Objects.equals(timestamp, that.timestamp);
+                Objects.equals(timestamp, that.timestamp) &&
+                Objects.equals(messagingSystem, that.messagingSystem) &&
+                Objects.equals(messagingDestination, that.messagingDestination);
     }
 
     @Override
     public int hashCode() {
         return Objects.hash(sourceNode, targetNode, sourceOperation, targetOperation,
-                nodeConnectionHash, operationConnectionHash, timestamp);
+                nodeConnectionHash, operationConnectionHash, timestamp,
+                messagingSystem, messagingDestination);
     }
 
     @Override
@@ -126,6 +155,8 @@ public class NodeOperationDetail {
                 ", nodeConnectionHash='" + nodeConnectionHash + '\'' +
                 ", operationConnectionHash='" + operationConnectionHash + '\'' +
                 ", timestamp='" + timestamp + '\'' +
+                ", messagingSystem='" + messagingSystem + '\'' +
+                ", messagingDestination='" + messagingDestination + '\'' +
                 '}';
     }
 }

@@ -16,6 +16,7 @@ import org.junit.jupiter.api.Test;
 import java.time.Instant;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -168,6 +169,85 @@ class NodeOperationDetailTest {
         String timestamp = detail.getTimestamp();
         assertTrue(timestamp.matches("\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(\\.\\d+)?Z"),
                 "Timestamp should be in ISO-8601 format: " + timestamp);
+    }
+
+    @Test
+    void testWithMessagingFields_serializesCorrectly() throws Exception {
+        Instant testInstant = Instant.parse("2021-01-01T00:00:00Z");
+        Node sourceNode = createTestNode("service", "prod", "order-service");
+        Node targetNode = createTestNode("service", "prod", "payment-service");
+        Operation sourceOp = new Operation("process-order");
+        Operation targetOp = new Operation("consume-order");
+
+        NodeOperationDetail detail = new NodeOperationDetail(
+                sourceNode, targetNode, sourceOp, targetOp, testInstant, "kafka", "orders-topic");
+
+        assertEquals("kafka", detail.getMessagingSystem());
+        assertEquals("orders-topic", detail.getMessagingDestination());
+
+        String json = OBJECT_MAPPER.writeValueAsString(detail);
+        assertTrue(json.contains("\"messagingSystem\":\"kafka\""));
+        assertTrue(json.contains("\"messagingDestination\":\"orders-topic\""));
+    }
+
+    @Test
+    void testWithoutMessagingFields_excludesFromJson() throws Exception {
+        Instant testInstant = Instant.parse("2021-01-01T00:00:00Z");
+        Node sourceNode = createTestNode("service", "prod", "service-a");
+        Node targetNode = createTestNode("service", "prod", "service-b");
+
+        NodeOperationDetail detail = new NodeOperationDetail(
+                sourceNode, targetNode, null, null, testInstant);
+
+        assertNull(detail.getMessagingSystem());
+        assertNull(detail.getMessagingDestination());
+
+        String json = OBJECT_MAPPER.writeValueAsString(detail);
+        assertFalse(json.contains("messagingSystem"));
+        assertFalse(json.contains("messagingDestination"));
+    }
+
+    @Test
+    void testEquals_withMessagingFields() {
+        Instant testInstant = Instant.parse("2021-01-01T00:00:00Z");
+        Node sourceNode = createTestNode("service", "prod", "service-a");
+        Node targetNode = createTestNode("service", "prod", "service-b");
+
+        NodeOperationDetail detail1 = new NodeOperationDetail(
+                sourceNode, targetNode, null, null, testInstant, "kafka", "topic");
+        NodeOperationDetail detail2 = new NodeOperationDetail(
+                sourceNode, targetNode, null, null, testInstant, "kafka", "topic");
+
+        assertEquals(detail1, detail2);
+        assertEquals(detail1.hashCode(), detail2.hashCode());
+    }
+
+    @Test
+    void testNotEquals_differentMessagingSystem() {
+        Instant testInstant = Instant.parse("2021-01-01T00:00:00Z");
+        Node sourceNode = createTestNode("service", "prod", "service-a");
+        Node targetNode = createTestNode("service", "prod", "service-b");
+
+        NodeOperationDetail detail1 = new NodeOperationDetail(
+                sourceNode, targetNode, null, null, testInstant, "kafka", "topic");
+        NodeOperationDetail detail2 = new NodeOperationDetail(
+                sourceNode, targetNode, null, null, testInstant, "rabbitmq", "topic");
+
+        assertFalse(detail1.equals(detail2));
+    }
+
+    @Test
+    void testToString_includesMessagingFields() {
+        Instant testInstant = Instant.parse("2021-01-01T00:00:00Z");
+        Node sourceNode = createTestNode("service", "prod", "service-a");
+        Node targetNode = createTestNode("service", "prod", "service-b");
+
+        NodeOperationDetail detail = new NodeOperationDetail(
+                sourceNode, targetNode, null, null, testInstant, "kafka", "orders");
+
+        String toString = detail.toString();
+        assertTrue(toString.contains("messagingSystem='kafka'"));
+        assertTrue(toString.contains("messagingDestination='orders'"));
     }
 
     private Node createTestNode(String type, String environment, String name) {

@@ -34,6 +34,8 @@ import org.opensearch.dataprepper.plugins.processor.otel_apm_service_map.model.O
 import org.opensearch.dataprepper.plugins.processor.otel_apm_service_map.model.internal.SpanStateData;
 import org.opensearch.dataprepper.plugins.processor.otel_apm_service_map.model.internal.ClientSpanDecoration;
 import org.opensearch.dataprepper.plugins.processor.otel_apm_service_map.model.internal.ServerSpanDecoration;
+import org.opensearch.dataprepper.plugins.processor.otel_apm_service_map.model.internal.ProducerSpanDecoration;
+import org.opensearch.dataprepper.plugins.processor.otel_apm_service_map.model.internal.ConsumerSpanDecoration;
 import org.opensearch.dataprepper.plugins.processor.otel_apm_service_map.model.internal.ThreeWindowTraceData;
 import org.opensearch.dataprepper.plugins.processor.otel_apm_service_map.model.internal.ThreeWindowTraceDataWithDecorations;
 import org.opensearch.dataprepper.plugins.processor.otel_apm_service_map.model.internal.EphemeralSpanDecorations;
@@ -77,6 +79,8 @@ public class OTelApmServiceMapProcessor extends AbstractProcessor<Record<Event>,
     private static final Collection<Record<Event>> EMPTY_COLLECTION = Collections.emptySet();
     private static final String SPAN_KIND_SERVER = "SPAN_KIND_SERVER";
     private static final String SPAN_KIND_CLIENT = "SPAN_KIND_CLIENT";
+    private static final String SPAN_KIND_PRODUCER = "SPAN_KIND_PRODUCER";
+    private static final String SPAN_KIND_CONSUMER = "SPAN_KIND_CONSUMER";
     private static final String NODE_TYPE_SERVICE = "service";
 
     // TODO: This should not be tracked in this class, move it up to the creator
@@ -605,17 +609,20 @@ public class OTelApmServiceMapProcessor extends AbstractProcessor<Record<Event>,
     }
 
     /**
-     * PHASE 1: DECORATE SPANS with ephemeral storage - Two-pass decoration: first CLIENT spans, then SERVER spans
+     * PHASE 1: DECORATE SPANS with ephemeral storage - Four-pass decoration
      *
-     * This method performs span decoration in two explicit passes over all spans in the trace.
      * Pass 1: Decorate CLIENT spans with remote server information
-     * Pass 2: Decorate SERVER spans and back-annotate CLIENT spans with parent server information
+     * Pass 2: Decorate PRODUCER spans with child CONSUMER span information
+     * Pass 3: Decorate SERVER spans, find CLIENT and PRODUCER descendants, back-annotate
+     * Pass 4: Decorate CONSUMER spans, find PRODUCER and CLIENT descendants, back-annotate
      *
      * @param traceData Three-window trace data with ephemeral decorations containing spans and indexes
      */
     private void decorateSpansInTraceWithEphemeralStorage(final ThreeWindowTraceDataWithDecorations traceData) {
         decorateClientSpansFirstPassWithEphemeralStorage(traceData);
-        decorateServerSpansSecondPassWithEphemeralStorage(traceData);
+        decorateProducerSpansSecondPassWithEphemeralStorage(traceData);
+        decorateServerSpansThirdPassWithEphemeralStorage(traceData);
+        decorateConsumerSpansFourthPassWithEphemeralStorage(traceData);
     }
 
     /**
@@ -659,19 +666,71 @@ public class OTelApmServiceMapProcessor extends AbstractProcessor<Record<Event>,
     }
 
     /**
-     * Second pass: decorate SERVER spans and back-annotate CLIENT spans with parent server information using ephemeral storage
-     * Traverse ALL SERVER spans in the trace and find their descendant CLIENT spans from same service
+     * Second pass: decorate PRODUCER spans with child CONSUMER span information.
+     * For each PRODUCER span, find its direct child CONSUMER spans (remote consumers)
+     * and extract messaging attributes.
      *
      * @param traceData Three-window trace data with ephemeral decorations containing spans and indexes
      */
-    private void decorateServerSpansSecondPassWithEphemeralStorage(final ThreeWindowTraceDataWithDecorations traceData) {
+    private void decorateProducerSpansSecondPassWithEphemeralStorage(final ThreeWindowTraceDataWithDecorations traceData) {
+        for (SpanStateData producerSpan : traceData.getLookupSpans()) {
+            if (SPAN_KIND_PRODUCER.equals(producerSpan.getSpanKind())) {
+                final String producerSpanId = producerSpan.getSpanId();
+                final Collection<SpanStateData> childConsumerSpans = traceData.getChildrenByParentId()
+                        .getOrDefault(producerSpanId, Collections.emptyList())
+                        .stream()
+                        .filter(span -> SPAN_KIND_CONSUMER.equals(span.getSpanKind()))
+                        .collect(java.util.stream.Collectors.toList());
+
+                String remoteService = "unknown";
+                String remoteOperation = "unknown";
+                String remoteEnvironment = "generic:default";
+                Map<String, String> remoteGroupByAttributes = Collections.emptyMap();
+
+                if (!childConsumerSpans.isEmpty()) {
+                    final SpanStateData childConsumerSpan = childConsumerSpans.iterator().next();
+                    remoteService = childConsumerSpan.getServiceName();
+                    remoteOperation = childConsumerSpan.getOperationName();
+                    remoteEnvironment = childConsumerSpan.getEnvironment();
+                    remoteGroupByAttributes = childConsumerSpan.getGroupByAttributes();
+                }
+
+                // Messaging attributes from the producer span itself
+                final String messagingSystem = producerSpan.getMessagingSystem();
+                final String messagingDestination = producerSpan.getMessagingDestination();
+
+                final ProducerSpanDecoration decoration = new ProducerSpanDecoration(
+                        null,
+                        remoteEnvironment,
+                        remoteService,
+                        remoteOperation,
+                        remoteGroupByAttributes,
+                        messagingSystem,
+                        messagingDestination
+                );
+                traceData.getDecorations().setProducerDecoration(producerSpanId, decoration);
+            }
+        }
+    }
+
+    /**
+     * Third pass: decorate SERVER spans and back-annotate CLIENT and PRODUCER spans with parent server information
+     * Traverse ALL SERVER spans in the trace and find their descendant CLIENT and PRODUCER spans from same service
+     *
+     * @param traceData Three-window trace data with ephemeral decorations containing spans and indexes
+     */
+    private void decorateServerSpansThirdPassWithEphemeralStorage(final ThreeWindowTraceDataWithDecorations traceData) {
         for (SpanStateData serverSpan : traceData.getLookupSpans()) {
             if (SPAN_KIND_SERVER.equals(serverSpan.getSpanKind())) {
-                final Collection<SpanStateData> clientDescendants = findClientDescendantsForServerThreeWindow(serverSpan, traceData);
+                final Map<String, Collection<SpanStateData>> descendants =
+                        findProducerAndClientDescendantsForEntrySpan(serverSpan, traceData);
+                final Collection<SpanStateData> clientDescendants = descendants.get("client");
+                final Collection<SpanStateData> producerDescendants = descendants.get("producer");
 
                 final ServerSpanDecoration serverDecoration = new ServerSpanDecoration(clientDescendants);
                 traceData.getDecorations().setServerDecoration(serverSpan.getSpanId(), serverDecoration);
 
+                // Back-annotate CLIENT descendants with parentServerOperationName
                 for (SpanStateData clientSpan : clientDescendants) {
                     final String clientSpanId = clientSpan.getSpanId();
                     final ClientSpanDecoration existingDecoration = traceData.getDecorations().getClientDecoration(clientSpanId);
@@ -696,22 +755,47 @@ public class OTelApmServiceMapProcessor extends AbstractProcessor<Record<Event>,
                         traceData.getDecorations().setClientDecoration(clientSpanId, newDecoration);
                     }
                 }
+
+                // Back-annotate PRODUCER descendants with parentEntryOperationName
+                for (SpanStateData producerSpan : producerDescendants) {
+                    final String producerSpanId = producerSpan.getSpanId();
+                    final ProducerSpanDecoration existingDecoration = traceData.getDecorations().getProducerDecoration(producerSpanId);
+
+                    if (existingDecoration != null) {
+                        final ProducerSpanDecoration updatedDecoration = new ProducerSpanDecoration(
+                                serverSpan.getOperationName(),
+                                existingDecoration.getRemoteEnvironment(),
+                                existingDecoration.getRemoteService(),
+                                existingDecoration.getRemoteOperation(),
+                                existingDecoration.getRemoteGroupByAttributes(),
+                                existingDecoration.getMessagingSystem(),
+                                existingDecoration.getMessagingDestination()
+                        );
+                        traceData.getDecorations().setProducerDecoration(producerSpanId, updatedDecoration);
+                    } else {
+                        final ProducerSpanDecoration newDecoration = new ProducerSpanDecoration(
+                                serverSpan.getOperationName(),
+                                producerSpan.getEnvironment(),
+                                "unknown",
+                                "unknown",
+                                Collections.emptyMap(),
+                                producerSpan.getMessagingSystem(),
+                                producerSpan.getMessagingDestination()
+                        );
+                        traceData.getDecorations().setProducerDecoration(producerSpanId, newDecoration);
+                    }
+                }
             }
         }
     }
 
     /**
      * PHASE 2: Generate NodeOperationDetail events and metrics from ephemeral decorations.
-     * Uses CLIENT-span-primary algorithm:
      *
-     * Step 1 (CLIENT spans): Each CLIENT span in processingSpans emits a full NodeOperationDetail.
-     * The CLIENT span's decoration contains all needed data: sourceNode from the span itself,
-     * targetNode from remoteService/remoteEnvironment, sourceOperation from parentServerOperationName
-     * (back-annotated in Phase 1 Pass 2), and targetOperation from remoteOperation.
-     *
-     * Step 2 (Leaf SERVER spans): SERVER spans with no CLIENT descendants emit a leaf
-     * NodeOperationDetail (sourceNode + sourceOperation only, no target). Server metrics
-     * are generated for ALL server spans regardless of leaf status.
+     * Step 1 (CLIENT spans): Each CLIENT span emits a full NodeOperationDetail.
+     * Step 1.5 (PRODUCER spans): Each PRODUCER span emits NodeOperationDetail with messaging info.
+     * Step 2 (SERVER spans): Metrics for all; leaf NodeOperationDetail for those with no outgoing descendants.
+     * Step 3 (CONSUMER spans): Metrics for all; leaf NodeOperationDetail for those with no PRODUCER/CLIENT descendants.
      *
      * @param traceData Three-window trace data with ephemeral decorations (only processing spans are used)
      * @param currentTime Current timestamp
@@ -769,6 +853,53 @@ public class OTelApmServiceMapProcessor extends AbstractProcessor<Record<Event>,
             }
         }
 
+        // Step 1.5: PRODUCER spans — emit NodeOperationDetail with messaging info and generate metrics
+        for (SpanStateData producerSpan : traceData.getProcessingSpans()) {
+            if (SPAN_KIND_PRODUCER.equals(producerSpan.getSpanKind())) {
+                final ProducerSpanDecoration decoration = traceData.getDecorations().getProducerDecoration(producerSpan.getSpanId());
+
+                if (decoration != null && !"unknown".equals(decoration.getRemoteService())) {
+                    final Node sourceNode = new Node(
+                            NODE_TYPE_SERVICE,
+                            new Node.KeyAttributes(producerSpan.getEnvironment(), producerSpan.getServiceName()),
+                            producerSpan.getGroupByAttributes()
+                    );
+
+                    final Node targetNode = new Node(
+                            NODE_TYPE_SERVICE,
+                            new Node.KeyAttributes(decoration.getRemoteEnvironment(), decoration.getRemoteService()),
+                            decoration.getRemoteGroupByAttributes()
+                    );
+
+                    final Operation sourceOp = decoration.getParentEntryOperationName() != null
+                            ? new Operation(decoration.getParentEntryOperationName())
+                            : null;
+                    final Operation targetOp = new Operation(decoration.getRemoteOperation());
+
+                    final Instant anchorTimestamp = getAnchorTimestampFromSpan(producerSpan, currentTime);
+
+                    final NodeOperationDetail nodeOperationDetail = new NodeOperationDetail(
+                            sourceNode, targetNode, sourceOp, targetOp, anchorTimestamp,
+                            decoration.getMessagingSystem(), decoration.getMessagingDestination());
+
+                    final EventMetadata eventMetadata = new DefaultEventMetadata.Builder()
+                            .withEventType(EVENT_TYPE_OTEL_APM_SERVICE_MAP).build();
+
+                    final Event event = eventFactory.eventBuilder(EventBuilder.class)
+                            .withEventMetadata(eventMetadata)
+                            .withData(nodeOperationDetail)
+                            .build();
+
+                    events.add(new Record<>(event));
+
+                    if (decoration.getParentEntryOperationName() != null) {
+                        ApmServiceMapMetricsUtil.generateMetricsForProducerSpan(
+                                producerSpan, decoration, currentTime, metricsStateByKey, anchorTimestamp);
+                    }
+                }
+            }
+        }
+
         // Step 2: SERVER spans — metrics for all, leaf NodeOperationDetail for those with no CLIENT descendants
         for (SpanStateData serverSpan : traceData.getProcessingSpans()) {
             if (SPAN_KIND_SERVER.equals(serverSpan.getSpanKind())) {
@@ -803,30 +934,128 @@ public class OTelApmServiceMapProcessor extends AbstractProcessor<Record<Event>,
             }
         }
 
+        // Step 3: CONSUMER spans — metrics for all, leaf NodeOperationDetail for those with no PRODUCER/CLIENT descendants
+        for (SpanStateData consumerSpan : traceData.getProcessingSpans()) {
+            if (SPAN_KIND_CONSUMER.equals(consumerSpan.getSpanKind())) {
+                final Instant anchorTimestamp = getAnchorTimestampFromSpan(consumerSpan, currentTime);
+                ApmServiceMapMetricsUtil.generateMetricsForConsumerSpan(
+                        consumerSpan, currentTime, metricsStateByKey, anchorTimestamp);
+
+                final ConsumerSpanDecoration decoration = traceData.getDecorations().getConsumerDecoration(consumerSpan.getSpanId());
+
+                if (decoration == null || (decoration.getProducerDescendants().isEmpty() && decoration.getClientDescendants().isEmpty())) {
+                    final Node sourceNode = new Node(
+                            NODE_TYPE_SERVICE,
+                            new Node.KeyAttributes(consumerSpan.getEnvironment(), consumerSpan.getServiceName()),
+                            consumerSpan.getGroupByAttributes()
+                    );
+
+                    final Operation sourceOp = new Operation(consumerSpan.getOperationName());
+
+                    final NodeOperationDetail nodeOperationDetail = new NodeOperationDetail(
+                            sourceNode, null, sourceOp, null, anchorTimestamp);
+
+                    final EventMetadata eventMetadata = new DefaultEventMetadata.Builder()
+                            .withEventType(EVENT_TYPE_OTEL_APM_SERVICE_MAP).build();
+
+                    final Event event = eventFactory.eventBuilder(EventBuilder.class)
+                            .withEventMetadata(eventMetadata)
+                            .withData(nodeOperationDetail)
+                            .build();
+
+                    events.add(new Record<>(event));
+                }
+            }
+        }
+
         return events;
     }
 
     /**
-     * Find CLIENT descendant spans from the same service as the SERVER span using three-window semantics
-     * Uses BFS with pruning - stops traversing when service name changes
+     * Fourth pass: decorate CONSUMER spans with PRODUCER and CLIENT descendants.
+     * CONSUMER spans are entry points (like SERVER spans) for async flows.
+     * Find PRODUCER and CLIENT descendants via BFS within the same service,
+     * and back-annotate them with the CONSUMER's operation as parentEntryOperationName.
      *
-     * @param serverSpan The SERVER span
-     * @param traceData Three-window trace data
-     * @return Collection of CLIENT descendant spans from the same service
+     * @param traceData Three-window trace data with ephemeral decorations containing spans and indexes
      */
-    private Collection<SpanStateData> findClientDescendantsForServerThreeWindow(final SpanStateData serverSpan,
-                                                                                final ThreeWindowTraceData traceData) {
+    private void decorateConsumerSpansFourthPassWithEphemeralStorage(final ThreeWindowTraceDataWithDecorations traceData) {
+        for (SpanStateData consumerSpan : traceData.getLookupSpans()) {
+            if (SPAN_KIND_CONSUMER.equals(consumerSpan.getSpanKind())) {
+                final Map<String, Collection<SpanStateData>> descendants =
+                        findProducerAndClientDescendantsForEntrySpan(consumerSpan, traceData);
+                final Collection<SpanStateData> producerDescendants = descendants.get("producer");
+                final Collection<SpanStateData> clientDescendants = descendants.get("client");
+
+                final ConsumerSpanDecoration consumerDecoration =
+                        new ConsumerSpanDecoration(producerDescendants, clientDescendants);
+                traceData.getDecorations().setConsumerDecoration(consumerSpan.getSpanId(), consumerDecoration);
+
+                // Back-annotate PRODUCER descendants with parentEntryOperationName from CONSUMER
+                for (SpanStateData producerSpan : producerDescendants) {
+                    final String producerSpanId = producerSpan.getSpanId();
+                    final ProducerSpanDecoration existingDecoration =
+                            traceData.getDecorations().getProducerDecoration(producerSpanId);
+
+                    if (existingDecoration != null && existingDecoration.getParentEntryOperationName() == null) {
+                        final ProducerSpanDecoration updatedDecoration = new ProducerSpanDecoration(
+                                consumerSpan.getOperationName(),
+                                existingDecoration.getRemoteEnvironment(),
+                                existingDecoration.getRemoteService(),
+                                existingDecoration.getRemoteOperation(),
+                                existingDecoration.getRemoteGroupByAttributes(),
+                                existingDecoration.getMessagingSystem(),
+                                existingDecoration.getMessagingDestination()
+                        );
+                        traceData.getDecorations().setProducerDecoration(producerSpanId, updatedDecoration);
+                    }
+                }
+
+                // Back-annotate CLIENT descendants with parentEntryOperationName from CONSUMER
+                for (SpanStateData clientSpan : clientDescendants) {
+                    final String clientSpanId = clientSpan.getSpanId();
+                    final ClientSpanDecoration existingDecoration =
+                            traceData.getDecorations().getClientDecoration(clientSpanId);
+
+                    if (existingDecoration != null && existingDecoration.getParentServerOperationName() == null) {
+                        final ClientSpanDecoration updatedDecoration = new ClientSpanDecoration(
+                                consumerSpan.getOperationName(),
+                                existingDecoration.getRemoteEnvironment(),
+                                existingDecoration.getRemoteService(),
+                                existingDecoration.getRemoteOperation(),
+                                existingDecoration.getRemoteGroupByAttributes()
+                        );
+                        traceData.getDecorations().setClientDecoration(clientSpanId, updatedDecoration);
+                    }
+                }
+            }
+        }
+    }
+
+    /**
+     * Find PRODUCER and CLIENT descendant spans from the same service as the entry span using BFS.
+     * Generalizes the previous findClientDescendantsForServerThreeWindow to collect both types.
+     * Stops traversing when service name changes.
+     *
+     * @param entrySpan The entry span (SERVER or CONSUMER)
+     * @param traceData Three-window trace data
+     * @return Map with "producer" and "client" keys mapping to their respective descendant collections
+     */
+    private Map<String, Collection<SpanStateData>> findProducerAndClientDescendantsForEntrySpan(
+            final SpanStateData entrySpan, final ThreeWindowTraceData traceData) {
         final Collection<SpanStateData> clientDescendants = new HashSet<>();
-        final String serverSpanId = serverSpan.getSpanId();
+        final Collection<SpanStateData> producerDescendants = new HashSet<>();
+        final String entrySpanId = entrySpan.getSpanId();
 
         final Set<String> visited = new HashSet<>();
         final java.util.Queue<String> queue = new java.util.LinkedList<>();
-        queue.offer(serverSpanId);
-        visited.add(serverSpanId);
+        queue.offer(entrySpanId);
+        visited.add(entrySpanId);
 
         while (!queue.isEmpty()) {
             final String currentSpanId = queue.poll();
-            final Collection<SpanStateData> children = traceData.getChildrenByParentId().getOrDefault(currentSpanId, Collections.emptyList());
+            final Collection<SpanStateData> children = traceData.getChildrenByParentId()
+                    .getOrDefault(currentSpanId, Collections.emptyList());
 
             for (SpanStateData child : children) {
                 final String childSpanId = child.getSpanId();
@@ -834,9 +1063,11 @@ public class OTelApmServiceMapProcessor extends AbstractProcessor<Record<Event>,
                 if (!visited.contains(childSpanId)) {
                     visited.add(childSpanId);
 
-                    if (serverSpan.getServiceName().equals(child.getServiceName())) {
+                    if (entrySpan.getServiceName().equals(child.getServiceName())) {
                         if (SPAN_KIND_CLIENT.equals(child.getSpanKind())) {
                             clientDescendants.add(child);
+                        } else if (SPAN_KIND_PRODUCER.equals(child.getSpanKind())) {
+                            producerDescendants.add(child);
                         }
 
                         queue.offer(childSpanId);
@@ -844,6 +1075,10 @@ public class OTelApmServiceMapProcessor extends AbstractProcessor<Record<Event>,
                 }
             }
         }
-        return clientDescendants;
+
+        final Map<String, Collection<SpanStateData>> result = new HashMap<>();
+        result.put("client", clientDescendants);
+        result.put("producer", producerDescendants);
+        return result;
     }
 }

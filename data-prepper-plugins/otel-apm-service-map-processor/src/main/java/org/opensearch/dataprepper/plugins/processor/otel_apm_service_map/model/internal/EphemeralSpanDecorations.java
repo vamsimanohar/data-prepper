@@ -22,6 +22,8 @@ import java.util.Map;
 public class EphemeralSpanDecorations {
     private final Map<String, ClientSpanDecoration> clientDecorations = new HashMap<>();
     private final Map<String, ServerSpanDecoration> serverDecorations = new HashMap<>();
+    private final Map<String, ProducerSpanDecoration> producerDecorations = new HashMap<>();
+    private final Map<String, ConsumerSpanDecoration> consumerDecorations = new HashMap<>();
 
     /**
      * Set CLIENT span decoration
@@ -84,19 +86,82 @@ public class EphemeralSpanDecorations {
     }
 
     /**
+     * Set PRODUCER span decoration
+     *
+     * @param spanIdHex The span ID in hex format
+     * @param decoration The producer decoration to store
+     */
+    public void setProducerDecoration(final String spanIdHex, final ProducerSpanDecoration decoration) {
+        producerDecorations.put(spanIdHex, decoration);
+    }
+
+    /**
+     * Get PRODUCER span decoration
+     *
+     * @param spanIdHex The span ID in hex format
+     * @return Producer decoration or null if not found
+     */
+    public ProducerSpanDecoration getProducerDecoration(final String spanIdHex) {
+        return producerDecorations.get(spanIdHex);
+    }
+
+    /**
+     * Check if PRODUCER decoration exists for span
+     *
+     * @param spanIdHex The span ID in hex format
+     * @return true if PRODUCER decoration exists
+     */
+    public boolean hasProducerDecoration(final String spanIdHex) {
+        return producerDecorations.containsKey(spanIdHex);
+    }
+
+    /**
+     * Set CONSUMER span decoration
+     *
+     * @param spanIdHex The span ID in hex format
+     * @param decoration The consumer decoration to store
+     */
+    public void setConsumerDecoration(final String spanIdHex, final ConsumerSpanDecoration decoration) {
+        consumerDecorations.put(spanIdHex, decoration);
+    }
+
+    /**
+     * Get CONSUMER span decoration
+     *
+     * @param spanIdHex The span ID in hex format
+     * @return Consumer decoration or null if not found
+     */
+    public ConsumerSpanDecoration getConsumerDecoration(final String spanIdHex) {
+        return consumerDecorations.get(spanIdHex);
+    }
+
+    /**
+     * Check if CONSUMER decoration exists for span
+     *
+     * @param spanIdHex The span ID in hex format
+     * @return true if CONSUMER decoration exists
+     */
+    public boolean hasConsumerDecoration(final String spanIdHex) {
+        return consumerDecorations.containsKey(spanIdHex);
+    }
+
+    /**
      * Clear all decorations from memory
      */
     public void clear() {
         clientDecorations.clear();
         serverDecorations.clear();
+        producerDecorations.clear();
+        consumerDecorations.clear();
     }
 
     /**
      * Get total number of decorations stored
      *
-     * @return Total count of client and server decorations
+     * @return Total count of all decorations
      */
     public int size() {
-        return clientDecorations.size() + serverDecorations.size();
+        return clientDecorations.size() + serverDecorations.size()
+                + producerDecorations.size() + consumerDecorations.size();
     }
 }
